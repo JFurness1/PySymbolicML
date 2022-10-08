@@ -32,7 +32,7 @@ class Symbol:
     # How deep the graph can go
     MAX_DEPTH = 100
     # How fast to bias towards zeroth order symbols as we go deeper in the graph
-    DECAY = 0.1
+    DECAY = 0.5
 
     # Chance for a new zero order symbol to be a constant vs. a descriptor
     CONST_CHANCE = 0.5
@@ -227,7 +227,7 @@ class Symbol:
         return self.cval
     
     def descriptor(self, descriptors: list) -> float:
-        return descriptors[self.descriptor_idx]
+        return descriptors[:, self.descriptor_idx]
 
     # 1st order
     def sqrt(self, descriptors: list) -> float:
@@ -285,7 +285,7 @@ def optimise_constants(root: Symbol, data: list, targets: list):
     [[1, 2], [2, 3], ...]
     targets should be a list of corresponding oracle values.
     """
-    assert len(data) == len(targets), 'Data and targets must be the same length.'
+    assert data.shape[0] == targets.shape[0], 'Data and targets must be the same length.'
 
     n = root.count_constants(0)
     if n == 0:
@@ -313,15 +313,14 @@ def eval_func(root: Symbol, data: list, targets: list, length_penalty=0.1) -> fl
     length_penalty controls how aggressively we should penalise long expressions
     """
     score = 0
-    for i, d in enumerate(data):
-        try:
-            out = root.eval(d)
-        except ValueError:
-            out = np.nan
-        score += (targets[i] - out)**2
-    if math.isnan(score):
+
+    out = root.eval(data)
+
+    score = (targets - out)**2
+    if np.any(np.isnan(score)):
         score = 1e30
-    return score + length_penalty*root.dependents
+
+    return np.sum(score) + length_penalty*root.dependents
 
 def full_obj(root: Symbol, data: list, targets:list) -> float:
     """
@@ -331,8 +330,8 @@ def full_obj(root: Symbol, data: list, targets:list) -> float:
     root.set_constants(params, 0)
     return eval_func(root, data, targets)
 
-def oracle(x):
-    return 2*x**2 + 3*x + 4
+def oracle(data):
+    return 2*data[:,0]**2 + 3*data[:,1] + 4
 
 def plot_result(root, data, target):
     y = [root.eval(d) for d in data]
@@ -412,11 +411,24 @@ def eval_candidates(candidates: list, data: list, targets: list) -> list:
 
 
 # Generate some example descriptor data points
-data = [[x] for x in np.linspace(0.01, np.pi, 20)]
+dx = [x for x in np.linspace(0.01, np.pi, 20)]
+gx, gy = np.meshgrid(dx, dx)
+gx = gx.reshape(gx.shape[0]*gx.shape[1])
+gy = gy.reshape(gy.shape[0]*gy.shape[1])
+print(gx.shape, gy.shape)
+data = np.array((gx, gy)).T
+print(data.shape)
 # and the corresponding target values
-targets = [oracle(x[0]) for x in data]
+targets = oracle(data)
+print(targets.shape)
 
-best = evolutionary_search(data, targets)
+root = Symbol.new_random_symbol(data.shape[1], 0)
+root.simplify()
+print(str(root))
 
-print(str(best), '->', eval_func(best, data, targets))
-plot_result(best, data, targets)
+fin = eval_func(root, data, targets)
+print('final', fin)
+# best = evolutionary_search(data, targets)
+
+# print(str(best), '->', eval_func(best, data, targets))
+# plot_result(best, data, targets)

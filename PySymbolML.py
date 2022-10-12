@@ -32,10 +32,10 @@ class Symbol:
     # How deep the graph can go
     MAX_DEPTH = 100
     # How fast to bias towards zeroth order symbols as we go deeper in the graph
-    DECAY = 0.5
+    DECAY = 0.05
 
     # Chance for a new zero order symbol to be a constant vs. a descriptor
-    CONST_CHANCE = 0.5
+    CONST_CHANCE = 0.3
 
     def __init__(self, op: str, n_descriptors: int, depth: int, cval=None, descriptor_idx=None):
         self.op = op
@@ -56,6 +56,7 @@ class Symbol:
             'sqrt': self.sqrt,
             'pow2': self.pow2,
             'pow3': self.pow3,
+            'bound': self.bound,
 
             '+': self.add,
             '-': self.subtract,
@@ -223,33 +224,39 @@ class Symbol:
         return False
 
     # 0th order
-    def const(self, descriptors: list) -> float:
+    def const(self, descriptors: np.array) -> np.array:
         return self.cval
     
-    def descriptor(self, descriptors: list) -> float:
+    def descriptor(self, descriptors: np.array) -> np.array:
         return descriptors[:, self.descriptor_idx]
 
     # 1st order
-    def sqrt(self, descriptors: list) -> float:
+    def sqrt(self, descriptors: np.array) -> np.array:
         return np.sqrt(self.symbols[0].eval(descriptors))
 
-    def pow2(self, descriptors: list) -> float:
+    def pow2(self, descriptors: np.array) -> np.array:
         return self.symbols[0].eval(descriptors)**2
 
-    def pow3(self, descriptors: list) -> float:
+    def pow3(self, descriptors: np.array) -> np.array:
         return self.symbols[0].eval(descriptors)**3
 
+    def bound(self, descriptors: np.array) -> np.array:
+        return 1.0/(1.0 + self.symbols[0].eval(descriptors)**2)
+
+    def tanh(self, descriptors: np.array) -> np.array:
+        return np.tanh(self.symbols[0].eval(descriptors))
+
     # 2nd order symbols
-    def add(self, descriptors: list) -> float:
+    def add(self, descriptors: np.array) -> np.array:
         return self.symbols[0].eval(descriptors) + self.symbols[1].eval(descriptors)
 
-    def subtract(self, descriptors: list) -> float:
+    def subtract(self, descriptors: np.array) -> np.array:
         return self.symbols[0].eval(descriptors) - self.symbols[1].eval(descriptors)
 
-    def multiply(self, descriptors: list) -> float:
+    def multiply(self, descriptors: np.array) -> np.array:
         return self.symbols[0].eval(descriptors) * self.symbols[1].eval(descriptors)
 
-    def divide(self, descriptors: list) -> float:
+    def divide(self, descriptors: np.array) -> np.array:
         try:
             return self.symbols[0].eval(descriptors) / self.symbols[1].eval(descriptors)
         except ZeroDivisionError:
@@ -292,7 +299,7 @@ def optimise_constants(root: Symbol, data: list, targets: list):
         return []
 
     bounds = [(-10.0, 10.0) for i in range(n)]
-    res = differential_evolution(constant_obj, bounds, args=(root, data, targets))
+    res = differential_evolution(constant_obj, bounds, args=(root, data, targets), workers=10, polish=False)
     root.set_constants(res.x, 0)
     return res.x
 
@@ -315,10 +322,11 @@ def eval_func(root: Symbol, data: list, targets: list, length_penalty=0.1) -> fl
     score = 0
 
     out = root.eval(data)
-
-    score = (targets - out)**2
-    if np.any(np.isnan(score)):
+    
+    if np.any(np.isnan(out)):
         score = 1e30
+    else:
+        score = (targets - out)**2
 
     return np.sum(score) + length_penalty*root.dependents
 
@@ -355,6 +363,8 @@ def evolutionary_search(data, targets, maxiter=10, popsize=150, tolerance=0.1, p
 
     survivors = []
 
+    best = (None, 1e30)
+
     for i in range(maxiter):
         pop = generate_population(survivors, popsize, n_descriptors)
         results = eval_candidates(pop, data, targets)
@@ -363,13 +373,16 @@ def evolutionary_search(data, targets, maxiter=10, popsize=150, tolerance=0.1, p
         if results[0][1] < tolerance:
             return results[0][0]
         
-        print(f"Best in iter {i} was {str(results[0][0])} -> {results[0][1]}")
+        print(f"Best new iter {i} was {str(results[0][0])} -> {results[0][1]}")
+        if results[0][1] < best[1]:
+            best = (results[0][0].clone(), results[0][1])
+        print(f"Best in iter {i} was {str(best[0])} -> {best[1]}")
 
         survivors = [r[0] for r in results[:persistence]]
 
-    return survivors[0]
+    return best
 
-def generate_population(survivors: list, popsize: int, n_descriptors: int, proportion_new=0.1):
+def generate_population(survivors: list, popsize: int, n_descriptors: int, proportion_new=0.5):
     """
     Generates a new population of candidate expressions.
     Always keeps survivors, then populates up to popsize with either completely new or mutant 
@@ -409,26 +422,19 @@ def eval_candidates(candidates: list, data: list, targets: list) -> list:
         out.append((c, eval_func(c, data, targets)))
     return out
 
+if __name__ == "__main__":
+    # Generate some example descriptor data points
+    dx = [x for x in np.linspace(0.01, np.pi, 20)]
+    gx, gy = np.meshgrid(dx, dx)
+    gx = gx.reshape(gx.shape[0]*gx.shape[1])
+    gy = gy.reshape(gy.shape[0]*gy.shape[1])
+    data = np.array((gx, gy)).T
 
-# Generate some example descriptor data points
-dx = [x for x in np.linspace(0.01, np.pi, 20)]
-gx, gy = np.meshgrid(dx, dx)
-gx = gx.reshape(gx.shape[0]*gx.shape[1])
-gy = gy.reshape(gy.shape[0]*gy.shape[1])
-print(gx.shape, gy.shape)
-data = np.array((gx, gy)).T
-print(data.shape)
-# and the corresponding target values
-targets = oracle(data)
-print(targets.shape)
+    # and the corresponding target values
+    targets = oracle(data)
 
-root = Symbol.new_random_symbol(data.shape[1], 0)
-root.simplify()
-print(str(root))
+    best = evolutionary_search(data, targets)
 
-fin = eval_func(root, data, targets)
-print('final', fin)
-# best = evolutionary_search(data, targets)
+    print(str(best[0]), '->', eval_func(best[0], data, targets))
 
-# print(str(best), '->', eval_func(best, data, targets))
-# plot_result(best, data, targets)
+ 
